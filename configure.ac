@@ -639,26 +639,11 @@ AC_ARG_WITH(vdo,
 
 AC_MSG_RESULT([$VDO])
 
-AC_ARG_WITH(vdo-format,
-	    AS_HELP_STRING([--with-vdo-format=PATH],
-			   [vdoformat tool: [autodetect]]),
-			   VDO_FORMAT_CMD=$withval, VDO_FORMAT_CMD="autodetect")
 AS_CASE(["$VDO"],
 	[no|none], [],
 	[internal], [
-		AC_DEFINE([VDO_INTERNAL], 1, [Define to 1 to include built-in support for vdo.])
-		AS_IF([test "$VDO_FORMAT_CMD" = "autodetect"], [
-			AC_PATH_TOOL(VDO_FORMAT_CMD, vdoformat, [], [$PATH])
-			AS_IF([test -z "$VDO_FORMAT_CMD"], [
-				AC_MSG_WARN([vdoformat not found in path $PATH])
-				VDO_FORMAT_CMD="/usr/bin/vdoformat"
-				VDO_CONFIGURE_WARN=y
-			])
-		])],
+		AC_DEFINE([VDO_INTERNAL], 1, [Define to 1 to include built-in support for vdo.])],
 	[AC_MSG_ERROR([--with-vdo parameter invalid])])
-
-AC_DEFINE_UNQUOTED([VDO_FORMAT_CMD], ["$VDO_FORMAT_CMD"],
-		   [The path to 'vdoformat', if available.])
 #
 # Do we need to use the API??
 # Do we want to link lvm2 with a big library for VDO formatting ?
@@ -2038,7 +2023,6 @@ AC_SUBST(USE_TRACKING)
 AC_SUBST(USRSBINDIR)
 AC_SUBST(VALGRIND_POOL)
 AC_SUBST(VDO)
-AC_SUBST(VDO_FORMAT_CMD)
 AC_SUBST(VDO_INCLUDE)
 AC_SUBST(VDO_LIB)
 AC_SUBST(WRITECACHE)
@@ -2137,8 +2121,6 @@ AS_IF([test -n "$CACHE_CONFIGURE_WARN"],
 AS_IF([test -n "$CACHE_CHECK_VERSION_WARN"],
       [AC_MSG_WARN([You should install latest cache_check vsn 0.7.0 to use lvm2 cache metadata format 2])])
 
-AS_IF([test -n "$VDO_CONFIGURE_WARN"],
-      [AC_MSG_WARN([Unrecognized 'vdoformat' tool is REQUIRED for VDO logical volume creation!])])
 
 AS_IF([test -n "$LVM_NEEDS_LIBAIO_WARN"],
       [AC_MSG_WARN([Only libdm part can be build without libaio:  make [[install_]]device-mapper])])

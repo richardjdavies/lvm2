@@ -21,8 +21,10 @@
 #include "lib/metadata/segtype.h"
 #include "lib/activate/activate.h"
 #include "lib/config/defaults.h"
-#include "lib/misc/lvm-exec.h"
 #include "lib/metadata/lv_alloc.h"
+#include "lib/device/dev-cache.h"
+#include "lib/label/label.h"
+#include "lib/metadata/vdo_format.h"
 
 #include <sys/sysinfo.h>
 #include <stdarg.h>
@@ -38,7 +40,6 @@
 #define VDO_SWAP_USAGE_FRACTION(x)		(((x) * 2) / 3)	/* Use 2/3 of available swap */
 
 /* Buffer sizes */
-#define VDO_FORMAT_OUTPUT_BUF_SIZE		256	/* For output line from vdoformat */
 #define VDO_MSG_BUF_SIZE			512	/* Msg about memory use of VDO */
 
 const char *get_vdo_compression_state_name(enum dm_vdo_compression_state state)
@@ -255,116 +256,189 @@ int parse_vdo_pool_status(struct dm_pool *mem, const struct logical_volume *vdo_
 
 
 /*
- * Formats data LV for a use as a VDO pool LV.
+ * Parse a size string as used in vdo_format_options (e.g. "--logical-size=4G").
+ * Suffix: B=bytes, K=KiB, M=MiB, G=GiB, T=TiB, P=PiB; no suffix = MiB.
+ * Returns size in bytes, or 0 on parse error (also logs an error).
+ */
+static uint64_t _parse_vdo_size(const char *s)
+{
+	uint64_t num = 0;
+	unsigned shift;
+	const char *p = s;
+	char suffix;
+
+	while (*p >= '0' && *p <= '9')
+		num = num * 10 + (uint64_t)(*p++ - '0');
+
+	suffix = *p ? (char)(*p | 0x20) : 'm'; /* default no-suffix = MiB */
+	switch (suffix) {
+	case 'b': shift =  0; break;
+	case 'k': shift = 10; break;
+	case 'm': shift = 20; break;
+	case 'g': shift = 30; break;
+	case 't': shift = 40; break;
+	case 'p': shift = 50; break;
+	default:
+		log_error("Invalid size suffix in vdo_format_options value \"%s\".", s);
+		return 0;
+	}
+	return num << shift;
+}
+
+/*
+ * Parse an --uds-memory-size value string to a VDO_INDEX_MEMORY_* code.
+ * Accepts "0.25", "0.5"/"0.50", "0.75", or an integer 1..1024 (GiB).
+ * Returns 0 and logs an error on failure.
+ */
+static int _parse_vdo_index_memory(const char *s)
+{
+	if (!strcmp(s, "0.25")) return VDO_INDEX_MEMORY_256MB;
+	if (!strcmp(s, "0.5") || !strcmp(s, "0.50")) return VDO_INDEX_MEMORY_512MB;
+	if (!strcmp(s, "0.75")) return VDO_INDEX_MEMORY_768MB;
+
+	/* integer GiB */
+	{
+		long gib = 0;
+		const char *p = s;
+		while (*p >= '0' && *p <= '9') gib = gib * 10 + (*p++ - '0');
+		if (!*p && gib >= 1 && gib <= 1024)
+			return (int)gib;
+	}
+	log_error("Invalid --uds-memory-size value \"%s\" in vdo_format_options.", s);
+	return 0;
+}
+
+/*
+ * Formats data LV for use as a VDO pool LV.
  *
- * Calls tool 'vdoformat' on the already active volume.
+ * Writes VDO on-disk metadata (geometry block + super block) natively,
+ * without requiring an external vdoformat binary.
  */
 static int _format_vdo_pool_data_lv(struct logical_volume *data_lv,
 				    const struct dm_vdo_target_params *vtp,
 				    uint64_t *logical_size)
 {
-	char *dpath, *c;
-	struct pipe_data pdata;
-	uint64_t logical_size_aligned = 1;
-	FILE *f;
-	uint64_t lb;
-	unsigned slabbits;
-	int args = 0;
-	char buf[VDO_FORMAT_OUTPUT_BUF_SIZE];
-	char *buf_pos = buf;
-	const char *argv[DEFAULT_MAX_EXEC_ARGS + 9] = { /* Max supported args */
-		find_config_tree_str_allow_empty(data_lv->vg->cmd, global_vdo_format_executable_CFG, NULL)
-	};
+	struct cmd_context *cmd = data_lv->vg->cmd;
+	struct device *dev;
+	char name[PATH_MAX];
+	unsigned slab_bits;
+	int index_memory;
+	unsigned sparse;
+	uint64_t logical_size_bytes;
+	uint64_t logical_size_aligned;
+	const struct dm_config_node *cn;
+	const struct dm_config_value *cv;
+	int r = 0;
 
-	if (!prepare_exec_args(data_lv->vg->cmd, argv, &args, global_vdo_format_options_CFG))
-		return_0;
-
-	if (!(dpath = lv_path_dup(data_lv->vg->cmd->mem, data_lv))) {
-		log_error("Failed to build device path for VDO formatting of data volume %s.",
-			  display_lvname(data_lv));
-		return 0;
-	}
-
-	if (*logical_size) {
-		logical_size_aligned = 0;
-
-		argv[++args] = buf_pos;
-		buf_pos += 1 + dm_snprintf(buf_pos, 30, "--logical-size=" FMTu64 "K",
-					   (*logical_size / 2));
-	}
-
-	/* Convert slab_size from MiB to KiB / block_size */
-	slabbits = vtp->slab_size_mb / DM_VDO_BLOCK_SIZE * 2 * 1024;
-	if (!slabbits)
-		slabbits = 1;
-	slabbits = 31 - clz(slabbits);
-	log_debug("Slab size %s converted to %u bits.",
-		  display_mb_size(data_lv->vg->cmd, vtp->slab_size_mb), slabbits);
-
-	argv[++args] = buf_pos;
-	buf_pos += 1 + dm_snprintf(buf_pos, 30, "--slab-bits=%u", slabbits);
-
-	/* Convert size to GiB units or one of these strings: 0.25, 0.50, 0.75 */
-	argv[++args] = buf_pos;
-	if (vtp->index_memory_size_mb >= 1024)
-		buf_pos += 1 + dm_snprintf(buf_pos, 30, "--uds-memory-size=%u",
-					   vtp->index_memory_size_mb / 1024);
-	else
-		buf_pos += 1 + dm_snprintf(buf_pos, 30, "--uds-memory-size=0.%2u",
-					   (vtp->index_memory_size_mb < 512) ? 25U :
-					   (vtp->index_memory_size_mb < 768) ? 50U : 75U);
-
-	if (vtp->use_sparse_index)
-		argv[++args] = "--uds-sparse";
-
-	/* Only unused VDO data LV could be activated and wiped */
+	/* Only unused VDO data LV may be formatted */
 	if (!dm_list_empty(&data_lv->segs_using_this_lv)) {
 		log_error(INTERNAL_ERROR "Failed to wipe logical VDO data for volume %s.",
 			  display_lvname(data_lv));
 		return 0;
 	}
 
-	argv[++args] = dpath;
+	/* Derive format parameters from the VDO target params */
 
-	if (!(f = pipe_open(data_lv->vg->cmd, argv, 0, &pdata))) {
-		log_error("Cannot read output from %s.", argv[0]);
-		return 0;
-	}
+	/* Convert slab_size_mb → slab_bits: slab_size_mb / DM_VDO_BLOCK_SIZE * 2 * 1024
+	 * gives a power-of-two block count whose log2 is slab_bits. */
+	slab_bits = vtp->slab_size_mb / DM_VDO_BLOCK_SIZE * 2 * 1024;
+	if (!slab_bits)
+		slab_bits = 1;
+	slab_bits = 31 - clz(slab_bits);
+	log_debug("Slab size %s converted to %u bits.",
+		  display_mb_size(cmd, vtp->slab_size_mb), slab_bits);
 
-	while (!feof(f) && fgets(buf, sizeof(buf), f)) {
-		/* TODO: Watch out for locales */
-		if (!*logical_size)
-			if (sscanf(buf, "Logical blocks defaulted to " FMTu64 " blocks", &lb) == 1) {
-				*logical_size = lb * DM_VDO_BLOCK_SIZE;
-				log_verbose("Available VDO logical blocks " FMTu64 " (%s).",
-					    lb, display_size(data_lv->vg->cmd, *logical_size));
+	/* Convert index_memory_size_mb to VDO_INDEX_MEMORY_* code or GiB integer */
+	if (vtp->index_memory_size_mb >= 1024)
+		index_memory = (int)(vtp->index_memory_size_mb / 1024);
+	else if (vtp->index_memory_size_mb < 512)
+		index_memory = VDO_INDEX_MEMORY_256MB;
+	else if (vtp->index_memory_size_mb < 768)
+		index_memory = VDO_INDEX_MEMORY_512MB;
+	else
+		index_memory = VDO_INDEX_MEMORY_768MB;
+
+	sparse = vtp->use_sparse_index ? 1 : 0;
+
+	/* Logical size in bytes (0 = let the formatter choose a default) */
+	logical_size_bytes = *logical_size ? (*logical_size << SECTOR_SHIFT) : 0;
+
+	/* Apply any overrides from global/vdo_format_options */
+	if ((cn = find_config_tree_array(cmd, global_vdo_format_options_CFG, NULL))) {
+		for (cv = cn->v; cv; cv = cv->next) {
+			const char *opt;
+
+			if (cv->type != DM_CFG_STRING || !cv->v.str || !cv->v.str[0])
+				continue;
+			opt = cv->v.str;
+
+			if (!strncmp(opt, "--slab-bits=", 12)) {
+				slab_bits = (unsigned)atoi(opt + 12);
+			} else if (!strncmp(opt, "--uds-memory-size=", 18)) {
+				int m = _parse_vdo_index_memory(opt + 18);
+				if (!m)
+					return 0;
+				index_memory = m;
+			} else if (!strcmp(opt, "--uds-sparse")) {
+				sparse = 1;
+			} else if (!strncmp(opt, "--logical-size=", 15)) {
+				uint64_t sz = _parse_vdo_size(opt + 15);
+				if (!sz)
+					return 0;
+				logical_size_bytes = sz;
+			} else {
+				log_warn("WARNING: Ignoring unrecognised vdo_format_options entry \"%s\".", opt);
 			}
-		if ((c = strchr(buf, '\n')))
-			*c = 0; /* cut last '\n' away */
-		if (buf[0])
-			log_print_unless_silent("  %s", buf); /* Print vdo_format messages */
-	}
-
-	if (!pipe_close(&pdata)) {
-		log_error("Command %s failed.", argv[0]);
-		return 0;
-	}
-
-	if (!*logical_size) {
-		log_error("Number of VDO logical blocks was not provided by vdo_format output.");
-		return 0;
-	}
-
-	if (logical_size_aligned) {
-		/* align obtained size to extent size */
-		logical_size_aligned = *logical_size / data_lv->vg->extent_size * data_lv->vg->extent_size;
-		if (*logical_size != logical_size_aligned) {
-			log_debug("Using bigger VDO virtual size unaligned on extent size by %s.",
-				  display_size(data_lv->vg->cmd, *logical_size - logical_size_aligned));
 		}
 	}
 
-	return 1;
+	/* Obtain the device handle for the activated data LV */
+	sync_local_dev_names(cmd);
+
+	if (dm_snprintf(name, sizeof(name), "%s%s/%s",
+			cmd->dev_dir, data_lv->vg->name, data_lv->name) < 0) {
+		log_error("Name too long for VDO formatting of %s.", display_lvname(data_lv));
+		return 0;
+	}
+
+	if (!(dev = dev_cache_get(cmd, name, NULL))) {
+		log_error("Device %s not found for VDO formatting.", name);
+		return 0;
+	}
+
+	if (!label_scan_open_rw(dev)) {
+		log_error("Failed to open %s for VDO formatting.", display_lvname(data_lv));
+		return 0;
+	}
+
+	if (!vdo_format(cmd, dev,
+			(uint64_t)data_lv->size << SECTOR_SHIFT,
+			slab_bits, index_memory, sparse,
+			&logical_size_bytes)) {
+		log_error("VDO formatting of %s failed.", display_lvname(data_lv));
+		goto out;
+	}
+
+	/* Convert bytes back to sectors for the caller */
+	*logical_size = logical_size_bytes >> SECTOR_SHIFT;
+
+	/* Log the alignment note when using a formatter-chosen logical size */
+	if (!(*logical_size)) {
+		log_error("VDO format did not produce a logical size for %s.",
+			  display_lvname(data_lv));
+		goto out;
+	}
+
+	logical_size_aligned = *logical_size / data_lv->vg->extent_size *
+			       data_lv->vg->extent_size;
+	if (*logical_size != logical_size_aligned)
+		log_debug("Using bigger VDO virtual size unaligned on extent size by %s.",
+			  display_size(cmd, *logical_size - logical_size_aligned));
+
+	r = 1;
+out:
+	label_scan_invalidate(dev);
+	return r;
 }
 
 /*

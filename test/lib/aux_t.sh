@@ -1990,13 +1990,6 @@ have_vdo() {
 		return 1
 	}
 	target_at_least dm-vdo "$@"
-	local vdoformat
-
-	vdoformat=$(lvm lvmconfig --typeconfig full --valuesonly global/vdo_format_executable || true)
-	# Remove surrounding "" around string
-	# TODO: lvmconfig should have an option to give this output directly
-	vdoformat=${vdoformat//\"}
-	[[ -x "$vdoformat" ]] || { echo "No executable to format VDO \"$vdoformat\"..."; return 1; }
 }
 
 get_vdo_stat() {

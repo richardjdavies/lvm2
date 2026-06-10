@@ -1369,14 +1369,11 @@ global {
 	# This configuration option has an automatic default value.
 	# cache_restore_options = [ "" ]
 
-	# Configuration option global/vdo_format_executable.
-	# The full path to the vdoformat command.
-	# LVM uses this command to initial data volume for VDO type logical volume
-	# This configuration option has an automatic default value.
-	# vdo_format_executable = "@VDO_FORMAT_CMD@"
-
 	# Configuration option global/vdo_format_options.
-	# List of options passed added to standard vdoformat command.
+	# List of options applied when formatting a new VDO pool data volume.
+	# Recognised options: --slab-bits=<n>, --uds-memory-size=<value>,
+	# --uds-sparse, --logical-size=<size>.
+	# Example: vdo_format_options = [ "--slab-bits=15" ]
 	# This configuration option has an automatic default value.
 	# vdo_format_options = [ "" ]
 

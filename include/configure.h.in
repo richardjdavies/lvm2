@@ -725,9 +725,6 @@
 /* Enable a valgrind aware build of pool */
 #undef VALGRIND_POOL
 
-/* The path to 'vdoformat', if available. */
-#undef VDO_FORMAT_CMD
-
 /* Define to 1 to include built-in support for vdo. */
 #undef VDO_INTERNAL
 

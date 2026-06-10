@@ -94,6 +94,7 @@ SOURCES =\
 	metadata/segtype.c \
 	metadata/snapshot_manip.c \
 	metadata/thin_manip.c \
+	metadata/vdo_format.c \
 	metadata/vdo_manip.c \
 	metadata/vg.c \
 	mirror/mirrored.c \

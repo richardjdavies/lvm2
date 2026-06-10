@@ -1,5 +1,7 @@
-Version 2.03.42 - 
+Version 2.03.42 -
 ==================
+  VDO pool formatting is now built into LVM2; external vdoformat binary no longer required.
+  Remove global/vdo_format_executable config setting (vdo_format_options is retained).
   Fix autoactivation on top of MD and loop devices if udev db records incomplete.
   Make MD device ready state check in udev to be in sync with MD udev rules.
 

@@ -1326,12 +1326,11 @@ cfg_array(global_cache_repair_options_CFG, "cache_repair_options", global_CFG_SE
 cfg_array(global_cache_restore_options_CFG, "cache_restore_options", global_CFG_SECTION, CFG_ALLOW_EMPTY | CFG_DEFAULT_COMMENTED, CFG_TYPE_STRING, DEFAULT_CACHE_RESTORE_OPTIONS_CONFIG, vsn(2, 3, 22), NULL, 0, NULL,
 	"List of options passed to the cache_restore command.\n")
 
-cfg(global_vdo_format_executable_CFG, "vdo_format_executable", global_CFG_SECTION, CFG_ALLOW_EMPTY | CFG_DEFAULT_COMMENTED, CFG_TYPE_STRING, VDO_FORMAT_CMD, VDO_1ST_VSN, "@VDO_FORMAT_CMD@", 0, NULL,
-	"The full path to the vdoformat command.\n"
-	"LVM uses this command to initial data volume for VDO type logical volume\n")
-
 cfg_array(global_vdo_format_options_CFG, "vdo_format_options", global_CFG_SECTION, CFG_ALLOW_EMPTY | CFG_DEFAULT_COMMENTED, CFG_TYPE_STRING, DEFAULT_VDO_FORMAT_OPTIONS_CONFIG, VDO_1ST_VSN, NULL, 0, NULL,
-	"List of options passed added to standard vdoformat command.\n")
+	"List of options applied when formatting a new VDO pool data volume.\n"
+	"Recognised options: --slab-bits=<n>, --uds-memory-size=<value>,\n"
+	"--uds-sparse, --logical-size=<size>.\n"
+	"Example: vdo_format_options = [ \"--slab-bits=15\" ]\n")
 
 cfg_array(global_vdo_disabled_features_CFG, "vdo_disabled_features", global_CFG_SECTION, CFG_ALLOW_EMPTY | CFG_DEFAULT_UNDEFINED, CFG_TYPE_STRING, NULL, vsn(2, 3, 11), NULL, 0, NULL,
 	"Features to not use in the vdo driver.\n"
